@@ -51,19 +51,25 @@ const App: React.FC = () => {
     setStep(3);
 
     try {
+      // 1. Produktbild vorbereiten
       const productBase64 = await urlToBase64(state.selectedProduct.imageUrl);
       
-      const [result, aiRecommendedSize] = await Promise.all([
-        performVirtualTryOn(
-          state.userImage, 
-          productBase64, 
-          state.selectedProduct.name
-        ),
-        estimateSizeFromImage(
-          state.userImage,
-          state.selectedProduct.name
-        )
-      ]);
+      // 2. Sequentieller Ablauf zur Schonung der Quota (Free Tier)
+      // Erst Größe schätzen
+      const aiRecommendedSize = await estimateSizeFromImage(
+        state.userImage,
+        state.selectedProduct.name
+      );
+
+      // Kurze Pause zwischen den Anfragen
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Dann die Anprobe generieren
+      const result = await performVirtualTryOn(
+        state.userImage, 
+        productBase64, 
+        state.selectedProduct.name
+      );
       
       setState(prev => ({ 
         ...prev, 
@@ -73,10 +79,14 @@ const App: React.FC = () => {
       }));
     } catch (err: any) {
       console.error("Process Error:", err);
+      let errorMessage = err.message || "Ein unerwarteter Fehler ist aufgetreten.";
+      if (errorMessage.includes("400")) errorMessage = "Das Foto ist zu detailreich oder groß. Bitte versuche es mit einem anderen Foto oder einer kleineren Datei.";
+      if (errorMessage.includes("429")) errorMessage = "Der Server ist aktuell ausgelastet (Limit erreicht). Bitte warte einen Moment und klicke auf 'Nochmal versuchen'.";
+      
       setState(prev => ({ 
         ...prev, 
         isLoading: false, 
-        error: err.message || "Ein unerwarteter Fehler ist aufgetreten." 
+        error: errorMessage 
       }));
     }
   };
@@ -214,7 +224,7 @@ const App: React.FC = () => {
               <div className="flex flex-col items-center justify-center py-20 text-center">
                 <div className="w-20 h-20 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mb-6"></div>
                 <h2 className="text-2xl font-bold text-gray-900 mb-2 italic uppercase">KI erstellt deinen Look...</h2>
-                <p className="text-gray-500 max-w-md">Dies kann bis zu 15 Sekunden dauern. Wir berechnen deine optimale Größe und generieren die Vorschau.</p>
+                <p className="text-gray-500 max-w-md">Dies kann bis zu 20 Sekunden dauern. Wir optimieren dein Foto und generieren die Vorschau nacheinander.</p>
               </div>
             ) : state.error ? (
               <div className="bg-white border-2 border-red-100 rounded-3xl p-10 text-center shadow-xl">
@@ -223,15 +233,15 @@ const App: React.FC = () => {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                 </div>
-                <h2 className="text-2xl font-black text-gray-900 mb-4">Hoppla! Ein Fehler ist aufgetreten</h2>
+                <h2 className="text-2xl font-black text-gray-900 mb-4">Ein technisches Problem</h2>
                 <div className="bg-red-50 rounded-2xl p-4 mb-8">
                   <p className="text-red-700 font-medium leading-relaxed">{state.error}</p>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                  <button onClick={() => setStep(2)} className="px-8 py-3 bg-indigo-600 text-white rounded-full font-bold shadow-lg hover:bg-indigo-700 transition-all">Nochmal versuchen</button>
+                  <button onClick={handleTryOn} className="px-8 py-3 bg-indigo-600 text-white rounded-full font-bold shadow-lg hover:bg-indigo-700 transition-all">Nochmal versuchen</button>
                   <button onClick={reset} className="px-8 py-3 bg-gray-100 text-gray-600 rounded-full font-bold hover:bg-gray-200 transition-all">Zum Start</button>
                 </div>
-                <p className="mt-8 text-xs text-gray-400 uppercase tracking-widest">Tipp: Prüfe deine Internetverbindung und den API-Key in Vercel.</p>
+                <p className="mt-8 text-xs text-gray-400 uppercase tracking-widest leading-relaxed">Tipp: Benutze ein Foto mit gutem Licht und achte darauf, dass du ganz zu sehen bist.</p>
               </div>
             ) : (
               <div className="grid md:grid-cols-2 gap-10 items-start">
@@ -271,7 +281,7 @@ const App: React.FC = () => {
                           <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
                         </div>
                         <p className="text-sm text-gray-600 leading-snug">
-                          <strong>Nachhaltig von Anfang bis Ende</strong> – Recycelte Materialien, faire Löhne in Portugal, klimaneutraler Versand.
+                          <strong>Nachhaltig von Anfang bis Ende</strong> – Recycelte Materialien, faire Löhne in Portugal.
                         </p>
                       </div>
                       <div className="flex items-start space-x-3">
@@ -279,20 +289,8 @@ const App: React.FC = () => {
                           <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
                         </div>
                         <p className="text-sm text-gray-600 leading-snug">
-                          <strong>Performance trifft Komfort</strong> – Squat-proof, atmungsaktiv und blickdicht. Entwickelt für dein intensivstes Workout.
+                          <strong>Performance trifft Komfort</strong> – Squat-proof, atmungsaktiv und blickdicht.
                         </p>
-                      </div>
-                      <div className="flex items-start space-x-3">
-                        <div className="mt-1 w-5 h-5 flex-shrink-0 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600">
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a5 5 0 00-5 5v2a2 2 0 00-2 2v5a2 2 0 002 2h10a2 2 0 002-2v-5a2 2 0 00-2-2V7a5 5 0 00-5-5zM7 7a3 3 0 016 0v2H7V7z"></path></svg>
-                        </div>
-                        <p className="text-sm text-gray-600 leading-snug"><strong>Sichere Zahlung & Kostenlose Retoure</strong></p>
-                      </div>
-                      <div className="flex items-center space-x-3">
-                        <div className="flex text-yellow-400">
-                          {"★★★★★".split("").map((s,i) => <span key={i} className="text-sm">★</span>)}
-                        </div>
-                        <p className="text-xs font-bold text-gray-500 uppercase tracking-tighter">4.9/5 von Early Testern</p>
                       </div>
                     </div>
 
@@ -302,7 +300,7 @@ const App: React.FC = () => {
                         <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-md font-black italic">-50% OFF</span>
                       </div>
                       <p className="text-sm text-gray-700 leading-relaxed mb-4">
-                        Nach dem Launch kostet das Set <span className="line-through text-gray-400">108€</span>. Das heißt du sparst <strong>54€</strong>! Bestelle jetzt und gib im Warenkorb einfach den Code ein:
+                        Nutze den Code für deine exklusive Pre-Order:
                       </p>
                       <div className="bg-white border-2 border-dashed border-indigo-200 py-3 text-center rounded-xl">
                         <span className="text-2xl font-black text-indigo-600 tracking-[0.2em] uppercase">PRE50</span>
@@ -330,10 +328,7 @@ const App: React.FC = () => {
                         </div>
                         <div className="flex-1">
                           <p className="text-sm text-emerald-800 leading-snug">
-                            Wir empfehlen dir für dieses Set die Größe <strong>{state.recommendedSize}</strong> für den perfekten Fit.
-                          </p>
-                          <p className="text-[11px] text-emerald-700 mt-2 leading-relaxed italic">
-                            Bitte beachte, dass dies natürlich nur eine erste Empfehlung ist. Solltest du dir bei der Größe unsicher sein, schaue dir gerne nochmal unseren Größenberater in der Produktbeschreibung an. :)
+                            Wir empfehlen dir die Größe <strong>{state.recommendedSize}</strong>.
                           </p>
                         </div>
                       </div>
