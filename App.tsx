@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Product, TryOnState } from './types';
 import { MOCK_PRODUCTS, AVAILABLE_SIZES } from './constants';
 import { performVirtualTryOn, fileToBase64, urlToBase64, estimateSizeFromImage } from './services/geminiService';
@@ -7,6 +7,7 @@ import ProductCard from './components/ProductCard';
 import StepIndicator from './components/StepIndicator';
 
 const App: React.FC = () => {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [state, setState] = useState<TryOnState>({
     userImage: null,
     selectedProduct: null,
@@ -17,6 +18,21 @@ const App: React.FC = () => {
   });
 
   const [step, setStep] = useState(1);
+
+  useEffect(() => {
+    const checkKey = async () => {
+      // @ts-ignore
+      const connected = await window.aistudio.hasSelectedApiKey();
+      setHasKey(connected);
+    };
+    checkKey();
+  }, []);
+
+  const handleConnect = async () => {
+    // @ts-ignore
+    await window.aistudio.openSelectKey();
+    setHasKey(true); // Race condition abfangen
+  };
 
   const handleProductSelect = useCallback((product: Product) => {
     setState(prev => ({ ...prev, selectedProduct: product }));
@@ -34,16 +50,6 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleDownload = () => {
-    if (!state.resultImage) return;
-    const link = document.createElement('a');
-    link.href = state.resultImage;
-    link.download = `better-future-look-${state.selectedProduct?.id || 'tryon'}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   const handleTryOn = async () => {
     if (!state.userImage || !state.selectedProduct) return;
 
@@ -51,25 +57,12 @@ const App: React.FC = () => {
     setStep(3);
 
     try {
-      // 1. Produktbild vorbereiten
       const productBase64 = await urlToBase64(state.selectedProduct.imageUrl);
       
-      // 2. Sequentieller Ablauf zur Schonung der Quota (Free Tier)
-      // Erst Größe schätzen
-      const aiRecommendedSize = await estimateSizeFromImage(
-        state.userImage,
-        state.selectedProduct.name
-      );
-
-      // Kurze Pause zwischen den Anfragen
-      await new Promise(r => setTimeout(r, 1500));
-
-      // Dann die Anprobe generieren
-      const result = await performVirtualTryOn(
-        state.userImage, 
-        productBase64, 
-        state.selectedProduct.name
-      );
+      // Sequentiell für maximale Stabilität
+      const aiRecommendedSize = await estimateSizeFromImage(state.userImage, state.selectedProduct.name);
+      await new Promise(r => setTimeout(r, 1000));
+      const result = await performVirtualTryOn(state.userImage, productBase64, state.selectedProduct.name);
       
       setState(prev => ({ 
         ...prev, 
@@ -79,46 +72,67 @@ const App: React.FC = () => {
       }));
     } catch (err: any) {
       console.error("Process Error:", err);
-      let errorMessage = err.message || "Ein unerwarteter Fehler ist aufgetreten.";
-      if (errorMessage.includes("400")) errorMessage = "Das Foto ist zu detailreich oder groß. Bitte versuche es mit einem anderen Foto oder einer kleineren Datei.";
-      if (errorMessage.includes("429")) errorMessage = "Der Server ist aktuell ausgelastet (Limit erreicht). Bitte warte einen Moment und klicke auf 'Nochmal versuchen'.";
-      
-      setState(prev => ({ 
-        ...prev, 
-        isLoading: false, 
-        error: errorMessage 
-      }));
+      let msg = err.message || "Ein technischer Fehler ist aufgetreten.";
+      if (msg.includes("not found")) {
+        setHasKey(false);
+        msg = "Bitte verbinde deinen API-Key erneut (Paid Project erforderlich).";
+      }
+      setState(prev => ({ ...prev, isLoading: false, error: msg }));
     }
   };
 
   const reset = () => {
-    setState({
-      userImage: null,
-      selectedProduct: null,
-      resultImage: null,
-      recommendedSize: null,
-      isLoading: false,
-      error: null,
-    });
+    setState({ userImage: null, selectedProduct: null, resultImage: null, recommendedSize: null, isLoading: false, error: null });
     setStep(1);
   };
 
+  if (hasKey === false) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="bg-white rounded-[32px] p-10 max-w-md w-full text-center shadow-2xl">
+          <div className="w-20 h-20 bg-indigo-100 rounded-3xl flex items-center justify-center mx-auto mb-6">
+            <span className="text-4xl">🔐</span>
+          </div>
+          <h1 className="text-2xl font-black text-gray-900 mb-4 uppercase tracking-tight">Anprobe aktivieren</h1>
+          <p className="text-gray-600 mb-8 leading-relaxed">
+            Um die hochauflösende KI-Anprobe zu nutzen, ist eine Verbindung zu deinem Google Cloud Projekt erforderlich. 
+            <br/><span className="text-xs mt-2 block font-medium text-gray-400 italic">Hinweis: Erfordert ein Projekt mit hinterlegter Abrechnung (Billing).</span>
+          </p>
+          <button 
+            onClick={handleConnect}
+            className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-lg hover:bg-indigo-700 transition-all shadow-xl active:scale-95"
+          >
+            JETZT VERBINDEN
+          </button>
+          <a 
+            href="https://ai.google.dev/gemini-api/docs/billing" 
+            target="_blank" 
+            className="block mt-6 text-xs text-indigo-500 font-bold hover:underline"
+          >
+            Infos zur Abrechnung & Limits
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen pb-20 bg-slate-50">
+    <div className="min-h-screen pb-20 bg-slate-50 font-sans">
       <header className="bg-white border-b border-gray-200 py-4 mb-8 sticky top-0 z-50 shadow-sm">
         <div className="container mx-auto px-4 flex justify-between items-center">
           <div className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center">
+            <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center shadow-lg">
               <span className="text-white font-bold text-lg">B</span>
             </div>
             <span className="font-bold text-xl tracking-tight uppercase">Better Future <span className="font-light text-gray-500">Collection</span></span>
           </div>
-          <button 
-            onClick={reset}
-            className="text-sm font-medium text-gray-500 hover:text-indigo-600 transition-colors"
-          >
-            Neustart
-          </button>
+          <div className="flex items-center space-x-4">
+            <div className="hidden sm:flex items-center space-x-1 px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-[10px] font-black uppercase tracking-widest border border-emerald-100">
+              <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
+              <span>Pro Engine Active</span>
+            </div>
+            <button onClick={reset} className="text-xs font-bold text-gray-400 hover:text-indigo-600 transition-colors uppercase tracking-widest">Reset</button>
+          </div>
         </div>
       </header>
 
@@ -127,33 +141,24 @@ const App: React.FC = () => {
 
         {step === 1 && (
           <div className="animate-fadeIn">
-            <div className="text-center mb-8">
-              <h1 className="text-3xl font-extrabold text-gray-900 sm:text-4xl">Wähle deinen Look</h1>
-              <p className="mt-3 text-lg text-gray-500">Entdecke die Better Future Collection an dir selbst.</p>
+            <div className="text-center mb-10">
+              <h1 className="text-4xl font-black text-gray-900 mb-3 tracking-tight">WÄHLE DEINEN LOOK</h1>
+              <p className="text-gray-500 text-lg">Wähle ein Set aus unserer neuen Kollektion.</p>
             </div>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-10 max-w-4xl mx-auto">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 mb-12 max-w-4xl mx-auto">
               {MOCK_PRODUCTS.map(product => (
-                <ProductCard 
-                  key={product.id}
-                  product={product}
-                  isSelected={state.selectedProduct?.id === product.id}
-                  onSelect={handleProductSelect}
-                />
+                <ProductCard key={product.id} product={product} isSelected={state.selectedProduct?.id === product.id} onSelect={handleProductSelect} />
               ))}
             </div>
-
             <div className="flex justify-center">
               <button
                 disabled={!state.selectedProduct}
                 onClick={() => setStep(2)}
-                className={`px-10 py-4 rounded-full font-bold text-lg transition-all shadow-xl ${
-                  state.selectedProduct 
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:-translate-y-1' 
-                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                className={`px-12 py-5 rounded-full font-black text-xl transition-all shadow-2xl ${
+                  state.selectedProduct ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:-translate-y-1' : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 }`}
               >
-                Weiter: Foto hochladen
+                FOTO HOCHLADEN
               </button>
             </div>
           </div>
@@ -161,219 +166,123 @@ const App: React.FC = () => {
 
         {step === 2 && (
           <div className="animate-fadeIn max-w-2xl mx-auto">
-            <div className="text-center mb-8">
-              <h1 className="text-3xl font-extrabold text-gray-900">Lade dein Foto hoch</h1>
-              <p className="mt-2 text-gray-500 italic text-sm">Unser KI-System analysiert deine Proportionen für eine präzise Größenempfehlung.</p>
+            <div className="text-center mb-10">
+              <h1 className="text-4xl font-black text-gray-900 mb-3">DEIN FOTO</h1>
+              <p className="text-gray-500">Für beste Ergebnisse: Nutze ein Ganzkörperfoto mit gutem Licht.</p>
             </div>
-
-            <div className="bg-white p-8 rounded-3xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center min-h-[400px]">
+            <div className="bg-white p-10 rounded-[40px] border-2 border-dashed border-gray-200 flex flex-col items-center justify-center min-h-[450px] shadow-inner">
               {state.userImage ? (
-                <div className="relative w-full max-w-xs">
-                  <img 
-                    src={state.userImage} 
-                    alt="Vorschau" 
-                    className="rounded-2xl shadow-xl w-full h-[400px] object-cover"
-                  />
-                  <button 
-                    onClick={() => setState(prev => ({ ...prev, userImage: null }))}
-                    className="absolute -top-3 -right-3 bg-red-500 text-white p-2 rounded-full shadow-lg hover:bg-red-600 transition-colors"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                    </svg>
+                <div className="relative w-full max-w-xs animate-scaleIn">
+                  <img src={state.userImage} alt="Vorschau" className="rounded-3xl shadow-2xl w-full h-[400px] object-cover border-4 border-white" />
+                  <button onClick={() => setState(prev => ({ ...prev, userImage: null }))} className="absolute -top-4 -right-4 bg-red-500 text-white p-3 rounded-full shadow-xl hover:bg-red-600 transition-transform hover:scale-110">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg>
                   </button>
                 </div>
               ) : (
-                <label className="w-full h-full flex flex-col items-center justify-center cursor-pointer group py-10">
-                  <div className="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center mb-4 transition-transform group-hover:scale-110">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
+                <label className="w-full h-full flex flex-col items-center justify-center cursor-pointer group py-12">
+                  <div className="w-24 h-24 bg-indigo-50 rounded-[32px] flex items-center justify-center mb-6 transition-all group-hover:scale-110 group-hover:bg-indigo-100 group-hover:rotate-3 shadow-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                   </div>
-                  <p className="text-gray-600 font-medium">Foto auswählen oder hierher ziehen</p>
+                  <p className="text-xl font-black text-gray-800 tracking-tight">BILD AUSWÄHLEN</p>
+                  <p className="text-gray-400 mt-2 text-sm uppercase tracking-widest font-bold">Max. 5MB • JPEG / PNG</p>
                   <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} />
                 </label>
               )}
             </div>
-
-            <div className="flex flex-col sm:flex-row gap-4 mt-8 justify-center">
-              <button
-                onClick={() => setStep(1)}
-                className="px-8 py-3 rounded-full font-bold text-lg bg-white text-gray-600 border border-gray-200"
-              >
-                Zurück
-              </button>
-              <button
-                disabled={!state.userImage}
-                onClick={handleTryOn}
-                className={`px-10 py-3 rounded-full font-bold text-lg transition-all shadow-lg ${
-                  state.userImage 
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:-translate-y-1' 
-                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                Look anprobieren ✨
-              </button>
+            <div className="flex flex-col sm:flex-row gap-4 mt-12 justify-center">
+              <button onClick={() => setStep(1)} className="px-10 py-4 rounded-full font-black text-gray-400 border-2 border-gray-100 hover:bg-gray-50 transition-all uppercase tracking-widest text-sm">Zurück</button>
+              <button disabled={!state.userImage} onClick={handleTryOn} className={`px-12 py-4 rounded-full font-black text-lg transition-all shadow-2xl ${state.userImage ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:-translate-y-1' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>PRO LOOK GENERIEREN ✨</button>
             </div>
           </div>
         )}
 
         {step === 3 && (
-          <div className="animate-fadeIn max-w-4xl mx-auto">
+          <div className="animate-fadeIn max-w-5xl mx-auto">
             {state.isLoading ? (
-              <div className="flex flex-col items-center justify-center py-20 text-center">
-                <div className="w-20 h-20 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mb-6"></div>
-                <h2 className="text-2xl font-bold text-gray-900 mb-2 italic uppercase">KI erstellt deinen Look...</h2>
-                <p className="text-gray-500 max-w-md">Dies kann bis zu 20 Sekunden dauern. Wir optimieren dein Foto und generieren die Vorschau nacheinander.</p>
+              <div className="flex flex-col items-center justify-center py-32 text-center">
+                <div className="relative mb-12">
+                   <div className="w-24 h-24 border-8 border-indigo-50 border-t-indigo-600 rounded-full animate-spin"></div>
+                   <div className="absolute inset-0 flex items-center justify-center text-2xl">✨</div>
+                </div>
+                <h2 className="text-3xl font-black text-gray-900 mb-4 tracking-tight uppercase italic">Better Future Engine läuft...</h2>
+                <div className="flex flex-col gap-2 max-w-sm">
+                  <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-indigo-500 w-1/2 animate-[loading_3s_ease-in-out_infinite]"></div>
+                  </div>
+                  <p className="text-gray-400 text-xs font-bold uppercase tracking-[0.2em]">Optimierung & Rendering</p>
+                </div>
               </div>
             ) : state.error ? (
-              <div className="bg-white border-2 border-red-100 rounded-3xl p-10 text-center shadow-xl">
-                <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
+              <div className="bg-white border-2 border-red-100 rounded-[40px] p-12 text-center shadow-2xl">
+                <div className="w-20 h-20 bg-red-50 text-red-500 rounded-3xl flex items-center justify-center mx-auto mb-8">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
                 </div>
-                <h2 className="text-2xl font-black text-gray-900 mb-4">Ein technisches Problem</h2>
-                <div className="bg-red-50 rounded-2xl p-4 mb-8">
-                  <p className="text-red-700 font-medium leading-relaxed">{state.error}</p>
-                </div>
+                <h2 className="text-3xl font-black text-gray-900 mb-6 tracking-tight">UPS, ETWAS LIEF SCHIEF</h2>
+                <p className="text-red-700 font-bold mb-10 max-w-md mx-auto leading-relaxed italic">"{state.error}"</p>
                 <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                  <button onClick={handleTryOn} className="px-8 py-3 bg-indigo-600 text-white rounded-full font-bold shadow-lg hover:bg-indigo-700 transition-all">Nochmal versuchen</button>
-                  <button onClick={reset} className="px-8 py-3 bg-gray-100 text-gray-600 rounded-full font-bold hover:bg-gray-200 transition-all">Zum Start</button>
+                  <button onClick={handleTryOn} className="px-12 py-4 bg-indigo-600 text-white rounded-full font-black shadow-xl hover:bg-indigo-700 transition-all uppercase tracking-widest">Retry</button>
+                  <button onClick={reset} className="px-12 py-4 bg-gray-100 text-gray-600 rounded-full font-black hover:bg-gray-200 transition-all uppercase tracking-widest">Startseite</button>
                 </div>
-                <p className="mt-8 text-xs text-gray-400 uppercase tracking-widest leading-relaxed">Tipp: Benutze ein Foto mit gutem Licht und achte darauf, dass du ganz zu sehen bist.</p>
               </div>
             ) : (
-              <div className="grid md:grid-cols-2 gap-10 items-start">
+              <div className="grid lg:grid-cols-2 gap-12 items-start animate-scaleIn">
                 <div className="space-y-8">
-                  <div className="relative group overflow-hidden rounded-3xl bg-white p-1">
-                    <img 
-                      src={state.resultImage!} 
-                      alt="KI Ergebnis" 
-                      className="w-full rounded-[28px] shadow-2xl transition-transform duration-500 group-hover:scale-[1.01]"
-                    />
-                    <div className="absolute top-6 right-6 flex flex-col gap-3">
-                      <div className="bg-indigo-600/90 backdrop-blur-md text-white px-4 py-1.5 rounded-full text-[11px] font-black uppercase tracking-widest shadow-xl">
-                        AI Vorschau
-                      </div>
-                      <button 
-                        onClick={handleDownload}
-                        title="Look speichern"
-                        className="bg-white/90 backdrop-blur-sm text-gray-800 p-2.5 rounded-full shadow-lg hover:bg-white transition-all transform hover:scale-110 flex items-center justify-center"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="bg-white rounded-3xl p-8 shadow-lg border border-gray-100">
-                    <h3 className="text-xl font-black text-gray-900 mb-4">Wir finden das Set steht dir super! 🎉</h3>
-                    <p className="text-gray-700 font-medium mb-6">
-                      Sichere dir deine Größe bei der Pre-Order zum halben Preis. 
-                      <span className="block mt-2 text-sm text-gray-500 font-normal italic">Über 100 Frauen haben bereits vorbestellt – und das aus gutem Grund:</span>
-                    </p>
-
-                    <div className="space-y-4 mb-8">
-                      <div className="flex items-start space-x-3">
-                        <div className="mt-1 w-5 h-5 flex-shrink-0 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600">
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
-                        </div>
-                        <p className="text-sm text-gray-600 leading-snug">
-                          <strong>Nachhaltig von Anfang bis Ende</strong> – Recycelte Materialien, faire Löhne in Portugal.
-                        </p>
-                      </div>
-                      <div className="flex items-start space-x-3">
-                        <div className="mt-1 w-5 h-5 flex-shrink-0 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600">
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
-                        </div>
-                        <p className="text-sm text-gray-600 leading-snug">
-                          <strong>Performance trifft Komfort</strong> – Squat-proof, atmungsaktiv und blickdicht.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6">
-                      <div className="flex justify-between items-center mb-4">
-                        <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Einmaliges Angebot</span>
-                        <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-md font-black italic">-50% OFF</span>
-                      </div>
-                      <p className="text-sm text-gray-700 leading-relaxed mb-4">
-                        Nutze den Code für deine exklusive Pre-Order:
-                      </p>
-                      <div className="bg-white border-2 border-dashed border-indigo-200 py-3 text-center rounded-xl">
-                        <span className="text-2xl font-black text-indigo-600 tracking-[0.2em] uppercase">PRE50</span>
-                      </div>
+                  <div className="relative group rounded-[40px] overflow-hidden bg-white p-2 shadow-2xl">
+                    <img src={state.resultImage!} alt="Ergebnis" className="w-full rounded-[34px] shadow-sm transition-transform duration-700 hover:scale-[1.02]" />
+                    <div className="absolute top-8 left-8">
+                       <span className="bg-black/80 backdrop-blur-xl text-white px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.3em] shadow-2xl border border-white/20">PRO RENDERING</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="bg-white p-8 rounded-3xl shadow-xl border border-gray-100 sticky top-28 flex flex-col">
-                  <div className="mb-6 pb-6 border-b border-gray-100">
-                    <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Better Future Collection</span>
-                    <h2 className="text-2xl font-black mt-1 leading-tight">{state.selectedProduct?.name}</h2>
-                    <p className="text-lg font-medium text-gray-500 mt-1">Dein virtuelles Fitting</p>
-                  </div>
-
-                  <div className="mb-8">
-                    <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-5 mb-6">
-                      <div className="flex items-center space-x-2 mb-2">
-                        <span className="text-xl">📏</span>
-                        <span className="font-bold text-emerald-900">Größenempfehlung</span>
+                <div className="bg-white p-10 rounded-[40px] shadow-2xl border border-gray-100 flex flex-col min-h-full">
+                  <div className="mb-10 pb-8 border-b border-gray-100">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className="text-indigo-600 font-black uppercase tracking-[0.2em] text-[10px]">PREMIUM LOOK</span>
+                        <h2 className="text-4xl font-black mt-2 leading-none tracking-tighter">{state.selectedProduct?.name}</h2>
                       </div>
-                      <div className="flex items-center space-x-4">
-                        <div className="bg-emerald-600 text-white w-14 h-14 rounded-xl flex items-center justify-center text-2xl font-black shadow-lg">
-                          {state.recommendedSize}
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-sm text-emerald-800 leading-snug">
-                            Wir empfehlen dir die Größe <strong>{state.recommendedSize}</strong>.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Größe anpassen</label>
-                      <div className="grid grid-cols-6 gap-2">
-                        {AVAILABLE_SIZES.map(size => (
-                          <button
-                            key={size}
-                            onClick={() => setState(prev => ({ ...prev, recommendedSize: size }))}
-                            className={`py-3 text-xs font-black rounded-xl transition-all ${
-                              state.recommendedSize === size 
-                                ? 'bg-indigo-600 text-white shadow-lg scale-105' 
-                                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                            }`}
-                          >
-                            {size}
-                          </button>
-                        ))}
+                      <div className="text-right">
+                        <span className="text-3xl font-black text-gray-900 leading-none">€89.00</span>
+                        <p className="text-[10px] font-bold text-emerald-500 uppercase mt-1">Sofort lieferbar</p>
                       </div>
                     </div>
                   </div>
 
-                  <p className="text-gray-500 mb-8 leading-relaxed text-sm italic">
-                    {state.selectedProduct?.description}
-                  </p>
+                  <div className="bg-indigo-50 rounded-3xl p-8 mb-10 flex items-center justify-between border border-indigo-100">
+                    <div className="flex items-center space-x-5">
+                       <div className="bg-white w-16 h-16 rounded-2xl flex items-center justify-center text-3xl font-black text-indigo-600 shadow-lg border-2 border-indigo-500">
+                         {state.recommendedSize}
+                       </div>
+                       <div>
+                         <p className="font-black text-indigo-900 text-xl tracking-tight">UNSERE EMPFEHLUNG</p>
+                         <p className="text-indigo-600/70 font-bold text-sm uppercase tracking-widest">AI SIZE ENGINE</p>
+                       </div>
+                    </div>
+                    <div className="text-indigo-600 animate-bounce">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    </div>
+                  </div>
+
+                  <div className="mb-10">
+                    <p className="text-gray-500 leading-relaxed font-medium mb-8">
+                      {state.selectedProduct?.description}
+                    </p>
+                    <div className="grid grid-cols-6 gap-2">
+                       {AVAILABLE_SIZES.map(size => (
+                         <button key={size} onClick={() => setState(prev => ({ ...prev, recommendedSize: size }))} className={`py-4 rounded-2xl font-black transition-all text-xs tracking-widest ${state.recommendedSize === size ? 'bg-indigo-600 text-white shadow-xl scale-105' : 'bg-gray-50 text-gray-400 hover:bg-gray-100'}`}>
+                           {size}
+                         </button>
+                       ))}
+                    </div>
+                  </div>
 
                   <div className="mt-auto space-y-4">
-                    <button 
-                      onClick={handleDownload}
-                      className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-lg hover:bg-black transition-all flex items-center justify-center space-x-3 shadow-2xl active:scale-[0.98]"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      <span>LOOK SPEICHERN</span>
+                    <button onClick={() => window.open('https://superbeautiful.de', '_blank')} className="w-full bg-slate-900 text-white py-6 rounded-3xl font-black text-xl hover:bg-black transition-all shadow-2xl active:scale-[0.98] uppercase tracking-widest flex items-center justify-center space-x-3">
+                      <span>ZUM WARENKORB</span>
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
                     </button>
-                    <button 
-                      onClick={reset}
-                      className="w-full text-gray-400 py-2 font-bold hover:text-indigo-600 transition-colors uppercase tracking-widest text-[10px]"
-                    >
-                      Anderen Look probieren
-                    </button>
+                    <button onClick={reset} className="w-full text-gray-400 py-2 font-black hover:text-indigo-600 transition-colors uppercase tracking-[0.3em] text-[10px]">Anderes Set probieren</button>
                   </div>
                 </div>
               </div>
@@ -382,9 +291,34 @@ const App: React.FC = () => {
         )}
       </main>
 
-      <footer className="mt-20 border-t border-gray-100 pt-10 text-center">
-        <p className="text-gray-400 text-[10px] uppercase tracking-widest font-bold">Better Future Collection • Smart Fitting Engine</p>
+      <footer className="mt-24 border-t border-gray-100 pt-12 pb-20 text-center">
+        <div className="flex items-center justify-center space-x-2 mb-4">
+          <div className="w-2 h-2 bg-emerald-500 rounded-full"></div>
+          <p className="text-gray-400 text-[10px] uppercase tracking-[0.4em] font-black">Better Future AI Engine v2.5 Pro</p>
+        </div>
+        <p className="text-gray-300 text-[8px] uppercase tracking-widest">© 2024 Superbeautiful GmbH • Alle Rechte vorbehalten</p>
       </footer>
+
+      <style>{`
+        @keyframes loading {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(200%); }
+        }
+        .animate-scaleIn {
+          animation: scaleIn 0.6s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+        }
+        @keyframes scaleIn {
+          from { opacity: 0; transform: scale(0.95); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        .animate-fadeIn {
+          animation: fadeIn 0.8s ease-out forwards;
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
     </div>
   );
 };
