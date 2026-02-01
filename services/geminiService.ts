@@ -3,7 +3,24 @@ import { GoogleGenAI } from "@google/genai";
 import { APP_CONFIG } from "../constants";
 
 /**
- * Komprimiert und skaliert Bilder, um das API-Limit (Error 400) nicht zu sprengen.
+ * Hilfsfunktion für automatische Wiederholungsversuche bei API-Fehlern.
+ */
+async function fetchWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const isRetryable = error.message?.includes("429") || error.status === 429 || error.message?.includes("quota");
+    if (retries > 0 && isRetryable) {
+      console.warn(`API Limit erreicht. Erneuter Versuch in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return fetchWithRetry(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Skaliert und komprimiert Bilder massiv, um API-Fehler (400) zu vermeiden.
  */
 async function optimizeImage(base64: string, maxWidth = 1024): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -14,6 +31,7 @@ async function optimizeImage(base64: string, maxWidth = 1024): Promise<string> {
       let width = img.width;
       let height = img.height;
 
+      // Seitenverhältnis beibehalten und auf maxWidth begrenzen
       if (width > height) {
         if (width > maxWidth) {
           height *= maxWidth / width;
@@ -29,12 +47,15 @@ async function optimizeImage(base64: string, maxWidth = 1024): Promise<string> {
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext('2d');
-      if (!ctx) return reject(new Error("Canvas failure"));
+      if (!ctx) return reject(new Error("Canvas context failure"));
       
+      // Weißer Hintergrund für JPEG-Konvertierung
       ctx.fillStyle = "white";
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.85));
+      
+      // 0.7 Qualität ist ein guter Kompromiss für die KI-Analyse
+      resolve(canvas.toDataURL('image/jpeg', 0.7));
     };
     img.onerror = () => reject(new Error("Bild konnte nicht verarbeitet werden."));
   });
@@ -45,7 +66,7 @@ function getCleanBase64(dataUrl: string): string {
 }
 
 export async function estimateSizeFromImage(userBase64: string, productName: string): Promise<string> {
-  try {
+  return fetchWithRetry(async () => {
     const optimized = await optimizeImage(userBase64, 800);
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const response = await ai.models.generateContent({
@@ -61,18 +82,14 @@ export async function estimateSizeFromImage(userBase64: string, productName: str
     const size = response.text?.trim().toUpperCase() || 'M';
     const validSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
     return validSizes.find(s => size.includes(s)) || 'M';
-  } catch (error) {
-    console.error("Size Error:", error);
-    return 'M';
-  }
+  });
 }
 
 export async function performVirtualTryOn(userBase64: string, productBase64: string, productName: string): Promise<string> {
-  try {
-    const [optUser, optProduct] = await Promise.all([
-      optimizeImage(userBase64, 1024),
-      optimizeImage(productBase64, 1024)
-    ]);
+  return fetchWithRetry(async () => {
+    // Bilder nacheinander optimieren
+    const optUser = await optimizeImage(userBase64, 1024);
+    const optProduct = await optimizeImage(productBase64, 1024);
 
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
@@ -106,12 +123,8 @@ export async function performVirtualTryOn(userBase64: string, productBase64: str
       return `data:image/jpeg;base64,${part.inlineData.data}`;
     }
 
-    throw new Error("KI hat kein Bild generiert. Bitte versuche es mit einem schärferen Foto.");
-  } catch (error: any) {
-    console.error("TryOn Error:", error);
-    if (error.message?.includes("400")) throw new Error("Bilddaten zu groß oder ungültig. Bitte anderes Foto wählen.");
-    throw error;
-  }
+    throw new Error("KI hat kein Bild generiert. Bitte versuche es mit einem anderen Foto.");
+  });
 }
 
 export async function fileToBase64(file: File): Promise<string> {
@@ -135,7 +148,7 @@ export async function urlToBase64(url: string): Promise<string> {
       const ctx = canvas.getContext('2d');
       if (!ctx) return reject(new Error("Canvas fail"));
       ctx.drawImage(img, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.9));
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
     };
     img.onerror = () => reject(new Error("Produktbild Download fehlgeschlagen"));
     img.src = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&w=1024&output=jpg`;
